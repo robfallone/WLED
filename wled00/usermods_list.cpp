@@ -48,6 +48,10 @@
   #include "../usermods/usermod_v2_mode_sort/usermod_v2_mode_sort.h"
 #endif
 
+#ifdef USERMOD_PIX_TEE
+  #include "PixTee/usermod_pixtee.h"
+#endif
+
 #ifdef USERMOD_BH1750
   #include "../usermods/BH1750_v2/usermod_BH1750.h"
 #endif
@@ -244,6 +248,10 @@ void registerUsermods()
 
   #ifdef USERMOD_MODE_SORT
   usermods.add(new ModeSortUsermod());
+  #endif
+
+  #ifdef USERMOD_PIX_TEE
+  usermods.add(new PixTeeUsermod());
   #endif
 
   #ifdef USERMOD_FOUR_LINE_DISPLAY

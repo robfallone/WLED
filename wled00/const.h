@@ -24,31 +24,36 @@
 #endif
 
 #ifndef WLED_MAX_BUSSES
-  #ifdef ESP8266
-    #define WLED_MAX_BUSSES 3
-    #define WLED_MIN_VIRTUAL_BUSSES 2
+  #if defined(USERMOD_PIX_TEE)
+    #define WLED_MAX_BUSSES 1
+    #define WLED_MIN_VIRTUAL_BUSSES 0
   #else
-    #if defined(CONFIG_IDF_TARGET_ESP32C3)    // 2 RMT, 6 LEDC, only has 1 I2S but NPB does not support it ATM
-      #define WLED_MAX_BUSSES 3               // will allow 2 digital & 1 analog (or the other way around)
-      #define WLED_MIN_VIRTUAL_BUSSES 3
-    #elif defined(CONFIG_IDF_TARGET_ESP32S2)  // 4 RMT, 8 LEDC, only has 1 I2S bus, supported in NPB
-      #if defined(USERMOD_AUDIOREACTIVE)      // requested by @softhack007 https://github.com/blazoncek/WLED/issues/33
-        #define WLED_MAX_BUSSES 6             // will allow 4 digital & 2 analog
+    #ifdef ESP8266
+      #define WLED_MAX_BUSSES 3
+      #define WLED_MIN_VIRTUAL_BUSSES 2
+    #else
+      #if defined(CONFIG_IDF_TARGET_ESP32C3)    // 2 RMT, 6 LEDC, only has 1 I2S but NPB does not support it ATM
+        #define WLED_MAX_BUSSES 3               // will allow 2 digital & 1 analog (or the other way around)
+        #define WLED_MIN_VIRTUAL_BUSSES 3
+      #elif defined(CONFIG_IDF_TARGET_ESP32S2)  // 4 RMT, 8 LEDC, only has 1 I2S bus, supported in NPB
+        #if defined(USERMOD_AUDIOREACTIVE)      // requested by @softhack007 https://github.com/blazoncek/WLED/issues/33
+          #define WLED_MAX_BUSSES 6             // will allow 4 digital & 2 analog
+          #define WLED_MIN_VIRTUAL_BUSSES 4
+        #else
+          #define WLED_MAX_BUSSES 7             // will allow 5 digital & 2 analog
+          #define WLED_MIN_VIRTUAL_BUSSES 3
+        #endif
+      #elif defined(CONFIG_IDF_TARGET_ESP32S3)  // 4 RMT, 8 LEDC, has 2 I2S but NPB does not support them ATM
+        #define WLED_MAX_BUSSES 6               // will allow 4 digital & 2 analog
         #define WLED_MIN_VIRTUAL_BUSSES 4
       #else
-        #define WLED_MAX_BUSSES 7             // will allow 5 digital & 2 analog
-        #define WLED_MIN_VIRTUAL_BUSSES 3
-      #endif
-    #elif defined(CONFIG_IDF_TARGET_ESP32S3)  // 4 RMT, 8 LEDC, has 2 I2S but NPB does not support them ATM
-      #define WLED_MAX_BUSSES 6               // will allow 4 digital & 2 analog
-      #define WLED_MIN_VIRTUAL_BUSSES 4
-    #else
-      #if defined(USERMOD_AUDIOREACTIVE)      // requested by @softhack007 https://github.com/blazoncek/WLED/issues/33
-        #define WLED_MAX_BUSSES 8
-        #define WLED_MIN_VIRTUAL_BUSSES 2
-      #else
-        #define WLED_MAX_BUSSES 10
-        #define WLED_MIN_VIRTUAL_BUSSES 0
+        #if defined(USERMOD_AUDIOREACTIVE)      // requested by @softhack007 https://github.com/blazoncek/WLED/issues/33
+          #define WLED_MAX_BUSSES 8
+          #define WLED_MIN_VIRTUAL_BUSSES 2
+        #else
+          #define WLED_MAX_BUSSES 10
+          #define WLED_MIN_VIRTUAL_BUSSES 0
+        #endif
       #endif
     #endif
   #endif
@@ -150,6 +155,7 @@
 #define USERMOD_ID_KLIPPER               40     //Usermod Klipper percentage
 #define USERMOD_ID_WIREGUARD             41     //Usermod "wireguard.h"
 #define USERMOD_ID_INTERNAL_TEMPERATURE  42     //Usermod "usermod_internal_temperature.h"
+#define USERMOD_ID_PIXTEE                70     //Usermod "usermod_pixtee.h"
 
 //Access point behavior
 #define AP_BEHAVIOR_BOOT_NO_CONN          0     //Open AP when no connection after boot
