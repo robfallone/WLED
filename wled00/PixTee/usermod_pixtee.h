@@ -24,7 +24,6 @@ public:
     static unsigned _txABufferOffset;
     static unsigned _accumRcvdBits;
     static unsigned _accumRcvdFrames;
-    static unsigned p_numRcvdBits;
 
     PixTeeUsermod();
     virtual ~PixTeeUsermod();

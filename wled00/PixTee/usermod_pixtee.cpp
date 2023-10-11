@@ -40,7 +40,6 @@ DRAM_ATTR portMUX_TYPE rmt_spinlock = portMUX_INITIALIZER_UNLOCKED;
 #define RMT_EXIT_CRITICAL()  // portEXIT_CRITICAL_SAFE(&rmt_spinlock)
 
 DRAM_ATTR rmt_isr_handle_t PixTeeUsermod::_rmtIsrHandle = nullptr;
-DRAM_ATTR unsigned PixTeeUsermod::p_numRcvdBits = 0;
 DRAM_ATTR unsigned PixTeeUsermod::_accumRcvdBits = 0;
 DRAM_ATTR unsigned PixTeeUsermod::_accumRcvdFrames = 0;
 DRAM_ATTR unsigned PixTeeUsermod::_numRcvdBits = 0;
@@ -203,7 +202,6 @@ static void IRAM_ATTR PixTeeRmtIsr(void* args)
             volatile rmt_item32_t* const txBBuffer = &RMTMEM.chan[PixTeeUsermod::_rmtTxChannelB].data32[0];
             txBBuffer[PixTeeUsermod::_txBBufferOffset].val = PixTeeUsermod::_stopTxSymbol.val;
             pixTeeCnts[4] += PixTeeUsermod::_numRcvdBits;
-            PixTeeUsermod::p_numRcvdBits = PixTeeUsermod::_numRcvdBits;
             PixTeeUsermod::_accumRcvdBits += PixTeeUsermod::_numRcvdBits;
             PixTeeUsermod::_accumRcvdFrames += 1;
             PixTeeUsermod::_numRcvdBits = 0;
@@ -255,15 +253,15 @@ void PixTeeUsermod::loop()
 
     if (elapsedTime >= timeThreshold)
     {
-        unsigned const numRcvdBits = p_numRcvdBits;
-        p_numRcvdBits = 0;
-        unsigned const numRcvdFrames = p_numRcvdFrames;
-        p_numRcvdFrames = 0;
+        unsigned const numRcvdBits = _accumRcvdBits;
+        _accumRcvdBits = 0;
+        unsigned const numRcvdFrames = _accumRcvdFrames;
+        _accumRcvdFrames = 0;
         lastTime = currTime;
 
-        DEBUG_PRINT(F("PixTeeUsermod::p_numRcvdBits = "));
+        DEBUG_PRINT(F("PixTeeUsermod::_accumRcvdBits = "));
         DEBUG_PRINTLN(numRcvdBits);
-        DEBUG_PRINT(F("PixTeeUsermod::p_numRcvdFrames = "));
+        DEBUG_PRINT(F("PixTeeUsermod::_accumRcvdFrames = "));
         DEBUG_PRINTLN(numRcvdFrames);
         DEBUG_PRINT(F("Frames / sec = "));
         DEBUG_PRINTLN(numRcvdFrames * 1000 / timeThreshold);
