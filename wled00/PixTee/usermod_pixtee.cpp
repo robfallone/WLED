@@ -20,6 +20,7 @@
 #define RMT_LL_MAX_FILTER_VALUE             255
 #define RMT_LL_MAX_IDLE_VALUE               65535
 #define RMT_LL_EVENT_TX_DONE(channel)     (1 << (channel))
+#define RMT_LL_EVENT_TX_THRES(channel)    (1 << ((channel) + 8))
 #define RMT_LL_EVENT_RX_DONE(channel)     (1 << ((channel) + 2))
 #define RMT_LL_EVENT_RX_THRES(channel)    (1 << ((channel) + 10))
 #define RMT_RX_CHANNEL_ENCODING_START (SOC_RMT_CHANNELS_PER_GROUP-SOC_RMT_TX_CANDIDATES_PER_GROUP)
@@ -33,7 +34,6 @@ typedef enum
     RMT_LL_MEM_OWNER_HW = 1,
 } rmt_ll_mem_owner_t;
 
-DRAM_ATTR unsigned pixTeeCnts[5] = { 0 };
 DRAM_ATTR portMUX_TYPE rmt_spinlock = portMUX_INITIALIZER_UNLOCKED;
 
 #define RMT_ENTER_CRITICAL() // portENTER_CRITICAL_SAFE(&rmt_spinlock)
@@ -42,10 +42,11 @@ DRAM_ATTR portMUX_TYPE rmt_spinlock = portMUX_INITIALIZER_UNLOCKED;
 DRAM_ATTR rmt_isr_handle_t PixTeeUsermod::_rmtIsrHandle = nullptr;
 DRAM_ATTR unsigned PixTeeUsermod::_accumRcvdBits = 0;
 DRAM_ATTR unsigned PixTeeUsermod::_accumRcvdFrames = 0;
-DRAM_ATTR unsigned PixTeeUsermod::_numRcvdBits = 0;
+DRAM_ATTR unsigned PixTeeUsermod::_numOfBitsInFrame = 0;
 DRAM_ATTR unsigned PixTeeUsermod::_rxBufferOffset = 0;
 DRAM_ATTR bool PixTeeUsermod::_startedTxA = false;
 DRAM_ATTR bool PixTeeUsermod::_startedTxB = false;
+DRAM_ATTR bool PixTeeUsermod::_rxDone = false;
 DRAM_ATTR unsigned PixTeeUsermod::_txBBufferOffset = 0;
 DRAM_ATTR unsigned PixTeeUsermod::_txABufferOffset = 0;
 DRAM_ATTR gpio_num_t PixTeeUsermod::_rxPin = USERMOD_PIXTEE_INPUT_PIN;
@@ -58,6 +59,10 @@ DRAM_ATTR unsigned PixTeeUsermod::_numOfBitsPerLed = 8;
 DRAM_ATTR unsigned PixTeeUsermod::_numOfLedsPerPixel = 3;
 DRAM_ATTR unsigned PixTeeUsermod::_numOfPixelsOnChanA = 3;
 DRAM_ATTR unsigned PixTeeUsermod::_numChanABits = _numOfPixelsOnChanA * _numOfBitsPerLed * _numOfLedsPerPixel;
+DRAM_ATTR int PixTeeUsermod::_numChanABlankBits = 0;
+DRAM_ATTR int PixTeeUsermod::_numChanBBlankBits = 0;
+DRAM_ATTR bool PixTeeUsermod::_needSetup = false;
+DRAM_ATTR bool PixTeeUsermod::_needBlank = false;
 
 DRAM_ATTR rmt_item32_t const PixTeeUsermod::_stopTxSymbol =
 {
@@ -67,6 +72,18 @@ DRAM_ATTR rmt_item32_t const PixTeeUsermod::_stopTxSymbol =
             .level0 = _eot_level,
             .duration1 = 0,
             .level1 = _eot_level,
+        }
+    }
+};
+
+DRAM_ATTR rmt_item32_t const PixTeeUsermod::_turnOffSymbol =
+{
+    {
+        {
+            .duration0 = 6,
+            .level0 = 1,
+            .duration1 = 19,
+            .level1 = 0,
         }
     }
 };
@@ -86,16 +103,54 @@ static inline uint32_t rmt_ll_rx_get_memory_writer_offset(uint32_t channel)
 
 static void IRAM_ATTR my_rmt_copy_symbols(void)
 {
+}
+
+__attribute__((always_inline))
+static inline void rmt_ll_clear_interrupt_status(uint32_t mask)
+{
+    RMT.int_clr.val = mask;
+}
+
+static void IRAM_ATTR PixTeeRmtIsr(void* args)
+{
+    uint32_t const txStatus = rmt_ll_get_tx_end_interrupt_status(&RMT);
+
+    if (txStatus & RMT_LL_EVENT_TX_THRES(0))
+    {
+        rmt_ll_clear_tx_thres_interrupt(&RMT, 0);
+    }
+
+    if (txStatus & RMT_LL_EVENT_TX_THRES(1))
+    {
+        rmt_ll_clear_tx_thres_interrupt(&RMT, 1);
+    }
+
+    if (rmt_ll_get_rx_thres_interrupt_status(&RMT) != 0)
+    {
+        rmt_ll_clear_interrupt_status(RMT_LL_EVENT_RX_THRES(RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel)));
+    }
+
+    if (rmt_ll_get_rx_end_interrupt_status(&RMT) != 0)
+    {
+        PixTeeUsermod::_rxDone = true;
+        RMT_ENTER_CRITICAL();
+        rmt_ll_clear_interrupt_status(RMT_LL_EVENT_RX_DONE(RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel)));
+        rmt_ll_rx_enable(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), false);
+        RMT_EXIT_CRITICAL();
+    }
+
+    rmt_ll_rx_set_mem_owner(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), RMT_LL_MEM_OWNER_SW);
+
     volatile rmt_item32_t const* const rxBuffer = &RMTMEM.chan[PixTeeUsermod::_rmtRxChannel].data32[0];
     volatile rmt_item32_t* const txABuffer = &RMTMEM.chan[PixTeeUsermod::_rmtTxChannelA].data32[0];
     volatile rmt_item32_t* const txBBuffer = &RMTMEM.chan[PixTeeUsermod::_rmtTxChannelB].data32[0];
 
     unsigned const rxWrOffset = rmt_ll_rx_get_memory_writer_offset(RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel));
 
-    while ((PixTeeUsermod::_rxBufferOffset != rxWrOffset) && (PixTeeUsermod::_numRcvdBits < PixTeeUsermod::GetNumOfBitsOnChanA()))
+    while ((PixTeeUsermod::_rxBufferOffset != rxWrOffset) && (PixTeeUsermod::_numOfBitsInFrame < PixTeeUsermod::GetNumOfBitsOnChanA()))
     {
         txABuffer[PixTeeUsermod::_txABufferOffset].val = rxBuffer[PixTeeUsermod::_rxBufferOffset].val;
-        PixTeeUsermod::_numRcvdBits += 1;
+        PixTeeUsermod::_numOfBitsInFrame += 1;
         PixTeeUsermod::_rxBufferOffset += 1;
 
         if (PixTeeUsermod::_rxBufferOffset >= PixTeeUsermod::_sizeOfRxBuffer)
@@ -111,15 +166,45 @@ static void IRAM_ATTR my_rmt_copy_symbols(void)
         }
     }
 
-    if (PixTeeUsermod::_numRcvdBits == PixTeeUsermod::GetNumOfBitsOnChanA())
+    if ((PixTeeUsermod::_numOfBitsInFrame >= PixTeeUsermod::GetNumOfBitsPerPixel()) && !PixTeeUsermod::_startedTxA)
     {
-        txABuffer[PixTeeUsermod::_txABufferOffset].val = PixTeeUsermod::_stopTxSymbol.val;
+        PixTeeUsermod::_startedTxA = true;
+        rmt_ll_tx_start(&RMT, PixTeeUsermod::_rmtTxChannelA);
     }
 
-    while (PixTeeUsermod::_rxBufferOffset != rxWrOffset)
+    if (PixTeeUsermod::_numOfBitsInFrame >= PixTeeUsermod::GetNumOfBitsOnChanA())
+    {
+        while (PixTeeUsermod::_numChanABlankBits > 0)
+        {
+            txABuffer[PixTeeUsermod::_txABufferOffset].val = PixTeeUsermod::_turnOffSymbol.val;
+            PixTeeUsermod::_txABufferOffset += 1;
+            PixTeeUsermod::_numChanABlankBits -= 1;
+
+            if (PixTeeUsermod::_txABufferOffset >= PixTeeUsermod::_sizeOfTxBuffer)
+            {
+                PixTeeUsermod::_txABufferOffset = 0;
+            }
+
+            if (PixTeeUsermod::_txABufferOffset == (PixTeeUsermod::_sizeOfTxBuffer / 2))
+            {
+                // break;
+            }
+        }
+    }
+
+    if (PixTeeUsermod::_rxDone || (PixTeeUsermod::_numOfBitsInFrame >= PixTeeUsermod::GetNumOfBitsOnChanA()))
+    {
+        if (PixTeeUsermod::_numChanABlankBits == 0)
+        {
+            txABuffer[PixTeeUsermod::_txABufferOffset].val = PixTeeUsermod::_stopTxSymbol.val;
+            PixTeeUsermod::_numChanABlankBits -= 1;
+        }
+    }
+
+    while ((PixTeeUsermod::_rxBufferOffset != rxWrOffset) && (PixTeeUsermod::_numOfBitsInFrame >= PixTeeUsermod::GetNumOfBitsOnChanA()))
     {
         txBBuffer[PixTeeUsermod::_txBBufferOffset].val = rxBuffer[PixTeeUsermod::_rxBufferOffset].val;
-        PixTeeUsermod::_numRcvdBits += 1;
+        PixTeeUsermod::_numOfBitsInFrame += 1;
         PixTeeUsermod::_rxBufferOffset += 1;
 
         if (PixTeeUsermod::_rxBufferOffset >= PixTeeUsermod::_sizeOfRxBuffer)
@@ -134,85 +219,65 @@ static void IRAM_ATTR my_rmt_copy_symbols(void)
             PixTeeUsermod::_txBBufferOffset = 0;
         }
     }
-}
 
-__attribute__((always_inline))
-static inline void rmt_ll_clear_interrupt_status(uint32_t mask)
-{
-    RMT.int_clr.val = mask;
-}
+    rmt_ll_rx_set_mem_owner(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), RMT_LL_MEM_OWNER_HW);
 
-static void IRAM_ATTR PixTeeRmtIsr(void* args)
-{
-    uint32_t const txStatus = rmt_ll_get_tx_end_interrupt_status(&RMT);
+    if ((PixTeeUsermod::_numOfBitsInFrame >= (PixTeeUsermod::GetNumOfBitsOnChanA() + PixTeeUsermod::GetNumOfBitsPerPixel())) && !PixTeeUsermod::_startedTxB)
+    {
+        PixTeeUsermod::_startedTxB = true;
+        rmt_ll_tx_start(&RMT, PixTeeUsermod::_rmtTxChannelB);
+    }
+
+    if (PixTeeUsermod::_rxDone)
+    {
+        volatile rmt_item32_t* const txBBuffer = &RMTMEM.chan[PixTeeUsermod::_rmtTxChannelB].data32[0];
+
+        while (PixTeeUsermod::_numChanBBlankBits > 0)
+        {
+            txBBuffer[PixTeeUsermod::_txBBufferOffset].val = PixTeeUsermod::_turnOffSymbol.val;
+            PixTeeUsermod::_txBBufferOffset += 1;
+            PixTeeUsermod::_numChanBBlankBits -= 1;
+
+            if (PixTeeUsermod::_txBBufferOffset >= PixTeeUsermod::_sizeOfTxBuffer)
+            {
+                PixTeeUsermod::_txBBufferOffset = 0;
+            }
+
+            if (PixTeeUsermod::_txBBufferOffset == (PixTeeUsermod::_sizeOfTxBuffer / 2))
+            {
+                // break;
+            }
+        }
+
+        if ((PixTeeUsermod::_numChanBBlankBits == 0) || !PixTeeUsermod::_startedTxB)
+        {
+            txBBuffer[PixTeeUsermod::_txBBufferOffset].val = PixTeeUsermod::_stopTxSymbol.val;
+
+            PixTeeUsermod::_numChanABlankBits = 0;
+            PixTeeUsermod::_rxDone = false;
+            PixTeeUsermod::_accumRcvdBits += PixTeeUsermod::_numOfBitsInFrame;
+            PixTeeUsermod::_accumRcvdFrames += 1;
+            PixTeeUsermod::_numOfBitsInFrame = 0;
+            PixTeeUsermod::_rxBufferOffset = 0;
+            rmt_ll_rx_reset_pointer(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel));
+            rmt_ll_rx_enable(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), true);
+        }
+    }
 
     if (txStatus & RMT_LL_EVENT_TX_DONE(0))
     {
-        pixTeeCnts[0] += 1;
+        PixTeeUsermod::_startedTxA = false;
+        PixTeeUsermod::_txABufferOffset = 0;
         rmt_ll_tx_reset_pointer(&RMT, 0);
         rmt_ll_clear_tx_end_interrupt(&RMT, 0);
     }
 
     if (txStatus & RMT_LL_EVENT_TX_DONE(1))
     {
-        pixTeeCnts[1] += 1;
+        PixTeeUsermod::_startedTxB = false;
+        PixTeeUsermod::_txBBufferOffset = 0;
         rmt_ll_tx_reset_pointer(&RMT, 1);
         rmt_ll_clear_tx_end_interrupt(&RMT, 1);
-    }
-
-    bool const rxThrsh = rmt_ll_get_rx_thres_interrupt_status(&RMT) != 0;
-
-    if (rxThrsh)
-    {
-        pixTeeCnts[2] += 1;
-        rmt_ll_clear_interrupt_status(RMT_LL_EVENT_RX_THRES(RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel)));
-    }
-
-    bool const rxDone = rmt_ll_get_rx_end_interrupt_status(&RMT) != 0;
-
-    if (rxDone)
-    {
-        pixTeeCnts[3] += 1;
-        RMT_ENTER_CRITICAL();
-        rmt_ll_clear_interrupt_status(RMT_LL_EVENT_RX_DONE(RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel)));
-        rmt_ll_rx_enable(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), false);
-        RMT_EXIT_CRITICAL();
-    }
-
-    if (rxThrsh || rxDone)
-    {
-        rmt_ll_rx_set_mem_owner(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), RMT_LL_MEM_OWNER_SW);
-        my_rmt_copy_symbols();
-        rmt_ll_rx_set_mem_owner(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), RMT_LL_MEM_OWNER_HW);
-
-        if ((PixTeeUsermod::_numRcvdBits >= PixTeeUsermod::GetNumOfBitsPerPixel()) && !PixTeeUsermod::_startedTxA)
-        {
-            PixTeeUsermod::_startedTxA = true;
-            rmt_ll_tx_start(&RMT, PixTeeUsermod::_rmtTxChannelA);
-        }
-
-        if ((PixTeeUsermod::_numRcvdBits > 80) && !PixTeeUsermod::_startedTxB)
-        {
-            PixTeeUsermod::_startedTxB = true;
-            rmt_ll_tx_start(&RMT, PixTeeUsermod::_rmtTxChannelB);
-        }
-
-        if (rxDone)
-        {
-            volatile rmt_item32_t* const txBBuffer = &RMTMEM.chan[PixTeeUsermod::_rmtTxChannelB].data32[0];
-            txBBuffer[PixTeeUsermod::_txBBufferOffset].val = PixTeeUsermod::_stopTxSymbol.val;
-            pixTeeCnts[4] += PixTeeUsermod::_numRcvdBits;
-            PixTeeUsermod::_accumRcvdBits += PixTeeUsermod::_numRcvdBits;
-            PixTeeUsermod::_accumRcvdFrames += 1;
-            PixTeeUsermod::_numRcvdBits = 0;
-            PixTeeUsermod::_rxBufferOffset = 0;
-            PixTeeUsermod::_startedTxA = false;
-            PixTeeUsermod::_txABufferOffset = 0;
-            PixTeeUsermod::_startedTxB = false;
-            PixTeeUsermod::_txBBufferOffset = 0;
-            rmt_ll_rx_reset_pointer(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel));
-            rmt_ll_rx_enable(&RMT, RMT_DECODE_RX_CHANNEL(PixTeeUsermod::_rmtRxChannel), true);
-        }
     }
 }
 
@@ -226,6 +291,7 @@ PixTeeUsermod::~PixTeeUsermod()
 
 void PixTeeUsermod::addToConfig(JsonObject& root)
 {
+    DEBUG_PRINTLN(F("PixTeeUsermod --- ADD TO CONFIG"));
     JsonObject top = root.createNestedObject(FPSTR("PixTee"));
     top[F("Pixels on Output A")] = _numOfPixelsOnChanA;
     top[F("LEDs per Pixel")] = _numOfLedsPerPixel;
@@ -239,6 +305,7 @@ void PixTeeUsermod::addToConfig(JsonObject& root)
 
 void PixTeeUsermod::appendConfigData()
 {
+    DEBUG_PRINTLN(F("PixTeeUsermod --- APPEND CONFIG"));
     oappend(SET_F("addInfo('PixTee:pin[]',0,'','for Input');"));
     oappend(SET_F("addInfo('PixTee:pin[]',1,'','for Output A');"));
     oappend(SET_F("addInfo('PixTee:pin[]',2,'','for Output B');"));
@@ -246,6 +313,12 @@ void PixTeeUsermod::appendConfigData()
 
 void PixTeeUsermod::loop()
 {
+    if (_needSetup)
+    {
+        setup();
+    }
+
+    static bool const dbgPrint = true;
     static unsigned lastTime = 0;
     unsigned const currTime = millis();
     unsigned const elapsedTime = currTime - lastTime;
@@ -259,31 +332,69 @@ void PixTeeUsermod::loop()
         _accumRcvdFrames = 0;
         lastTime = currTime;
 
-        DEBUG_PRINT(F("PixTeeUsermod::_accumRcvdBits = "));
-        DEBUG_PRINTLN(numRcvdBits);
-        DEBUG_PRINT(F("PixTeeUsermod::_accumRcvdFrames = "));
-        DEBUG_PRINTLN(numRcvdFrames);
-        DEBUG_PRINT(F("Frames / sec = "));
-        DEBUG_PRINTLN(numRcvdFrames * 1000 / timeThreshold);
-        DEBUG_PRINT(F("BitsPerFrame = "));
-        DEBUG_PRINTLN(numRcvdBits / numRcvdFrames);
-        DEBUG_PRINT(F("PixelsPerFrame = "));
-        DEBUG_PRINTLN(numRcvdBits / (numRcvdFrames * _numOfBitsPerLed * _numOfLedsPerPixel));
+        if (dbgPrint)
+        {
+            DEBUG_PRINT(F("PixTeeUsermod::_accumRcvdBits = "));
+            DEBUG_PRINTLN(numRcvdBits);
+            DEBUG_PRINT(F("PixTeeUsermod::_accumRcvdFrames = "));
+            DEBUG_PRINTLN(numRcvdFrames);
+            DEBUG_PRINT(F("Frames / sec = "));
+            DEBUG_PRINTLN(numRcvdFrames * 1000 / timeThreshold);
+            DEBUG_PRINT(F("BitsPerFrame = "));
+
+            if (numRcvdFrames == 0)
+            {
+                // Don't divide by zero.
+                DEBUG_PRINTLN(F("n/a"));
+            }
+            else
+            {
+                DEBUG_PRINTLN(numRcvdBits / numRcvdFrames);
+            }
+
+            DEBUG_PRINT(F("PixelsPerFrame = "));
+
+            if (numRcvdFrames == 0)
+            {
+                // Don't divide by zero.
+                DEBUG_PRINTLN(F("n/a"));
+            }
+            else
+            {
+                DEBUG_PRINTLN(numRcvdBits / (numRcvdFrames * _numOfBitsPerLed * _numOfLedsPerPixel));
+            }
+        }
     }
 }
 
 bool PixTeeUsermod::readFromConfig(JsonObject& root)
 {
+    DEBUG_PRINTLN(F("PixTeeUsermod --- READ FROM CONFIG"));
+
     JsonObject top = root[FPSTR("PixTee")];
     bool configComplete = !top.isNull();
 
     configComplete &= getJsonValue(top["Pixels on Output A"], _numOfPixelsOnChanA, 3);
     configComplete &= getJsonValue(top["LEDs per Pixel"], _numOfLedsPerPixel, 3);
     configComplete &= getJsonValue(top["Bits per LED"], _numOfBitsPerLed, 8);
+    unsigned const origNumChanABits = _numChanABits;
+    _numChanABits = _numOfPixelsOnChanA * _numOfBitsPerLed * _numOfLedsPerPixel;
+
+    if (_numChanABits > origNumChanABits)
+    {
+        _numChanABlankBits = 0;
+        _numChanBBlankBits = _numChanABits - origNumChanABits;
+    }
+    else
+    {
+        _numChanABlankBits = origNumChanABits - _numChanABits;
+        _numChanBBlankBits = 0;
+    }
+
     configComplete &= getJsonValue(top["pin"][0], _rxPin, USERMOD_PIXTEE_INPUT_PIN);
     configComplete &= getJsonValue(top["pin"][1], _txAPin, USERMOD_PIXTEE_OUTA_PIN);
     configComplete &= getJsonValue(top["pin"][2], _txBPin, USERMOD_PIXTEE_OUTB_PIN);
-    // setup();
+    _needSetup = true;
 
     return configComplete;
 }
@@ -338,6 +449,7 @@ void PixTeeUsermod::setup()
         #if SOC_RMT_SUPPORT_TX_LOOP_AUTO_STOP
                 rmt_ll_tx_enable_loop_autostop(&RMT, _rmtTxChannelA, true);
         #endif
+                // rmt_ll_enable_interrupt(&RMT, RMT_LL_EVENT_TX_THRES(_rmtTxChannelA), true);
                 rmt_ll_enable_interrupt(&RMT, RMT_LL_EVENT_TX_DONE(_rmtTxChannelA), true);
             }
             else
@@ -368,6 +480,7 @@ void PixTeeUsermod::setup()
         #if SOC_RMT_SUPPORT_TX_LOOP_AUTO_STOP
                 rmt_ll_tx_enable_loop_autostop(&RMT, _rmtTxChannelB, true);
         #endif
+                // rmt_ll_enable_interrupt(&RMT, RMT_LL_EVENT_TX_THRES(_rmtTxChannelB), true);
                 rmt_ll_enable_interrupt(&RMT, RMT_LL_EVENT_TX_DONE(_rmtTxChannelB), true);
             }
             else
@@ -410,11 +523,12 @@ void PixTeeUsermod::setup()
                 (rmt_config(&rmtConfig) == ESP_OK))
             {
                 _allocedRxPin = _rxPin;
-                _numRcvdBits = 0;
+                _numOfBitsInFrame = 0;
                 _rxBufferOffset = 0;
                 _startedTxA = false;
                 _txABufferOffset = 0;
                 _startedTxB = false;
+                _rxDone = false;
                 _txBBufferOffset = 0;
 
                 rmt_ll_rx_enable(&RMT, RMT_DECODE_RX_CHANNEL(_rmtRxChannel), false);
@@ -435,4 +549,7 @@ void PixTeeUsermod::setup()
             RMT_EXIT_CRITICAL();
         }
     }
+
+    _needSetup = false;
+    _needBlank = true;
 }

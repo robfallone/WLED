@@ -9,6 +9,7 @@ class PixTeeUsermod : public Usermod
 public:
     static unsigned const _eot_level = 0;
     static rmt_item32_t const _stopTxSymbol;
+    static rmt_item32_t const _turnOffSymbol;
     static rmt_channel_t const _rmtTxChannelA = rmt_channel_t::RMT_CHANNEL_0;
     static rmt_channel_t const _rmtTxChannelB = rmt_channel_t::RMT_CHANNEL_1;
     static rmt_channel_t const _rmtRxChannel = rmt_channel_t::RMT_CHANNEL_2;
@@ -16,14 +17,17 @@ public:
     static unsigned const _sizeOfTxBuffer = _numOfTxBuffers * SOC_RMT_MEM_WORDS_PER_CHANNEL;
     static unsigned const _numOfRxBuffers = 2;
     static unsigned const _sizeOfRxBuffer = _numOfRxBuffers * SOC_RMT_MEM_WORDS_PER_CHANNEL;
-    static unsigned _numRcvdBits;
+    static unsigned _numOfBitsInFrame;
     static bool _startedTxA;
     static bool _startedTxB;
+    static bool _rxDone;
     static unsigned _rxBufferOffset;
     static unsigned _txBBufferOffset;
     static unsigned _txABufferOffset;
     static unsigned _accumRcvdBits;
     static unsigned _accumRcvdFrames;
+    static int _numChanABlankBits;
+    static int _numChanBBlankBits;
 
     PixTeeUsermod();
     virtual ~PixTeeUsermod();
@@ -61,4 +65,6 @@ private:
     static unsigned _numOfLedsPerPixel;
     static unsigned _numOfPixelsOnChanA;
     static unsigned _numChanABits;
+    static bool _needSetup;
+    static bool _needBlank;
 };
